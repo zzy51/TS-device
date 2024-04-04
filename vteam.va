@@ -1,0 +1,139 @@
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module VTEAM_ORIGIN(TE, BE);
+
+    inout TE, BE;
+    electrical TE, BE;
+    parameter real Kon  = 200 from (0:inf);         //
+    parameter real Koff = -200 from (-inf:0);         //
+    parameter real alpha_on  = 1.25 from (0:inf);    //
+    parameter real alpha_off = 1.25 from (0:inf);    //
+    parameter real beta_on  = 0.5 from (0:inf);    //
+    parameter real beta_off = 0.5 from (0:inf);    //
+    parameter real kr = 10 from (0:inf); //fitting parameter
+    parameter real Ron  = 5.2e6 from (0:inf);      //low resistance
+    parameter real Roff = 1.2e10 from (Ron:inf);    //high resistance
+    parameter real Von  = 0.48 from (0:inf);      //Vthreshold
+    parameter real Voff = 0.07 from (-inf:Von);      //Vhold
+    parameter real tstep_max = 1e-10 from (0:inf); //max time step
+    parameter real tstep_min = 1e-12 from (0:inf); //min time step    
+    parameter real rtol = 1e3 from (1:inf);        //the larger rtol,the more acurrate
+    parameter real L = 6e-8 from (0:inf);       //length of oxide thickness
+
+    //parameter to simplify expression of resistance
+    real P2 = Roff + Ron/Roff;       
+    real k = asinh(Roff-P2)/L-asinh(Ron-P2)/L;   
+    real P1 = -asinh(Ron-P2)/k; 
+
+    (*desc="filament length", units="m"*)       real lf;
+    (*desc="gap length", units="m"*)            real gap;
+    (*desc="gap dynamics", units="m/s"*)        real dldt;
+    (*desc="gap dynamics", units="m"*)          real dl;
+    (*desc="gap dynamiics polarity", units=""*) real dldt_flag;
+    (*desc="TS resistance", units="ohm"*)       real R;
+    (*desc="adaptive dt", units="s"*)           real ada_dt;
+    (*desc="adaptive time step", units="s"*)    real ada_tstep;
+
+    real c_time, p_time, dt;
+    real Vtb, Itb;
+
+    analog function real clip_value;         //limit the arrange of x from min to max
+        input x, a_min, a_max;
+        real x, a_min, a_max;
+        if (x > a_max)
+            clip_value = a_max;
+        else if (x < a_min)
+            clip_value = a_min;
+        else
+            clip_value = x;
+    endfunction
+
+    analog function real ts_resistance1;      //the calculation of resistance
+        input g, gmax, ron, roff;
+        real g, gmax, ron, roff;
+
+        real g0 = gmax / ln(roff / ron);
+        if (g < gmax)
+            ts_resistance1 = ron * exp(g / g0);
+        else
+            ts_resistance1 = roff;
+    endfunction
+
+    analog function real ts_resistance2;      //the calculation of resistance
+        input g, gmax, roff, k, P1, P2;
+        real g, gmax, roff, k, P1, P2;
+
+        if (g <= gmax)
+            ts_resistance2 = sinh(k*(g-P1))+P2;
+        else
+            ts_resistance2 = roff;
+    endfunction
+
+    analog function real ts_resistance3;      //the calculation of resistance
+        input g, gmax, ron, roff;
+        real g, gmax, ron, roff;
+
+        if (g < gmax)
+            ts_resistance3 = ron + (roff-ron)*g/gmax;
+        else
+            ts_resistance3 = roff;
+    endfunction
+
+    analog function real ts_resistance4;      //the calculation of resistance
+        input g, gmax, ron, roff, kr;
+        real g, gmax, ron, roff, kr;
+
+        if (g < gmax)
+            ts_resistance4 = ron + (roff-ron)*(0.5+0.5*tanh(kr*g/gmax-0.5*kr));
+        else
+            ts_resistance4 = roff;
+    endfunction
+
+    analog begin //initialization
+        @(initial_step) begin //only run at the beginning of simualiton
+            lf = 0;
+            gap = L-lf;
+            dldt_flag = 0;
+            //trigger_on = 0;
+            //trigger_off = 0;
+            $display("---------- Parameters Auto Fitting ----------");
+            $display("---------------------------------------------");
+            $display("---------- Parameters Range Check ----------");
+            $display("--------------------------------------------");
+            p_time = $abstime;
+        end
+		
+        c_time = $abstime;                      //record present time
+        dt = c_time - p_time;
+        dl = dldt*dt;      
+        lf = clip_value(lf+dl, 0, L);
+        gap = L - lf;
+        Vtb = V(TE, BE); //voltage between top electrode and botton electrode
+        Itb = I(TE, BE); //current flow through rram
+        R = ts_resistance1(gap, L, Ron, Roff);
+        //R = ts_resistance2(gap, L, Roff, k, P1, P2);
+        //R = ts_resistance3(gap, L, Ron, Roff);
+        //R = ts_resistance4(gap, L, Ron, Roff, kr);
+        I(TE, BE) <+ Vtb / R;
+
+        // filament growth calculation
+        if (Vtb>=Von) begin    
+            dldt = Kon*pow(((Vtb-Von)/beta_on), alpha_on);  
+        end else if (Vtb<=Voff) begin                              
+            dldt = Koff*pow((Voff-Vtb)/beta_off, alpha_off);
+        end else begin    
+            dldt = 0;
+        end
+
+        p_time = $abstime;
+        //$display("[INFO] lf = %.3e, time = %.3e", lf, p_time);
+	// code that specify time step
+        // dynamically increase time resolution to fasten multi-timescale simulation
+        ada_dt = L / rtol / (abs(dldt) + 1e-20); //limit the max increment of CF in one timestep
+        //ada_tstep = min(ada_dt, tstep_max);
+        ada_tstep = max(min(ada_dt, tstep_max), tstep_min);
+        $bound_step(ada_tstep); //refresh simulation timestep
+    end
+endmodule
